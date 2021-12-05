@@ -1,0 +1,274 @@
+---
+title: "ModuleB_Assignment2"
+output: html_notebook
+---
+
+
+## Load packages and read in data
+```{r}
+library(tm)
+library(randomForest)
+library(mltest)
+library(dplyr)
+library(caTools)
+library(rfUtilities)
+library(mlapi)
+library(e1071)
+library(mclust)
+library(class)
+library(caret) # confusion matrix
+library(naivebayes)
+library(ggplot2)
+
+
+setwd("/Users/hutingyang/Desktop/FALL_2021/BSHES797R_TADA/ModuleB/ModuleB_Assignment2")
+
+tada_anno_data <- read.csv("TADA_Annotated_data.csv",header = T,encoding="UTF-8")
+glimpse(tada_anno_data)
+
+tada_unlabel_data <- read.csv("TADA_unlabeled_data.csv",header = T)
+
+```
+
+
+# Preprocess the labeled data
+```{r}
+anno_texts <-iconv(tada_anno_data$text, "ASCII", "UTF-8", sub="byte")
+anno_texts_corpus <- VCorpus(VectorSource(anno_texts))
+anno_texts_corpus <- tm_map(anno_texts_corpus,content_transformer(tolower))
+anno_texts_corpus <- tm_map(anno_texts_corpus, removePunctuation)
+anno_texts_corpus <- tm_map(anno_texts_corpus, removeWords,stopwords("english"))
+anno_texts_corpus <- tm_map(anno_texts_corpus, stemDocument)
+length(anno_texts_corpus)
+
+```
+
+
+## Generate n-grams(1-3) within labeled data
+```{r}
+NLP_tokenizer <- function(x) {
+  unlist(lapply(ngrams(words(x), 1:3), paste, collapse = "_"), use.names = FALSE)
+}
+
+anno_n_gram_corpus <- tm_map(anno_texts_corpus,content_transformer(NLP_tokenizer))
+```
+
+
+## Split the data sets before vectorization
+```{r}
+set.seed(1234)
+anno_split <- sample.split(tada_anno_data$class,SplitRatio = 0.8)
+
+anno_training_ngram_corpus <- subset(anno_n_gram_corpus, anno_split==TRUE)
+anno_eval_ngram_corpus <- subset(anno_n_gram_corpus, anno_split==FALSE)
+
+anno_training_classes <- subset(tada_anno_data$class, anno_split==TRUE)
+anno_eval_classes <- subset(tada_anno_data$class, anno_split==FALSE)
+```
+
+
+## Vectorization: generate a document-term matrix for training set 
+```{r}
+anno_training_dct_matrix <- DocumentTermMatrix(anno_training_ngram_corpus)
+
+# remove sparse n-grams
+anno_training_dct_matrix_sparse <- removeSparseTerms(anno_training_dct_matrix,0.995)
+
+## document-term matrix for the test set
+# pass the column names from the training set
+anno_eval_dct_matrix_sparse <- DocumentTermMatrix(anno_eval_ngram_corpus, list(dictionary=colnames(anno_training_dct_matrix_sparse)))
+
+```
+
+
+
+
+## Convert document-term matrix to dataframes
+```{r}
+anno_training_term_matrix_df <- as.data.frame(as.matrix(anno_training_dct_matrix_sparse))
+anno_eval_term_matrix_df <- as.data.frame(as.matrix(anno_eval_dct_matrix_sparse))
+
+colnames(anno_training_term_matrix_df) <- make.names(colnames(anno_training_term_matrix_df))
+colnames(anno_eval_term_matrix_df) <- make.names(colnames(anno_eval_term_matrix_df))
+
+anno_training_term_matrix_df$classes <- anno_training_classes
+anno_training_term_matrix_df$classes <-as.factor(anno_training_term_matrix_df$classes)
+```
+
+
+## SVM classifier
+```{r}
+svm_trained_model <- svm(classes ~., data= anno_training_term_matrix_df)
+svm_predictions <- predict(svm_trained_model, newdata= anno_eval_term_matrix_df)
+
+# Evaluation
+accuracy(anno_eval_classes,svm_predictions)
+
+#classifier_metrics <- ml_test(predicted_labels, true_labels, output.as.table = FALSE)
+class_metrics_svm <- ml_test(svm_predictions, anno_eval_classes, output.as.table = FALSE)
+class_metrics_svm$accuracy
+class_metrics_svm$F1
+class_metrics_svm$precision
+class_metrics_svm$recall
+
+confusionMatrix(table(svm_predictions,anno_eval_classes))
+```
+
+
+
+## Random forest classifier
+```{r}
+rf_trained_model <- randomForest(classes ~.,data= anno_training_term_matrix_df)
+rf_predictions <- predict(rf_trained_model, newdata= anno_eval_term_matrix_df)
+
+accuracy(anno_eval_classes,rf_predictions)
+
+class_metrics_rf <- ml_test(rf_predictions, anno_eval_classes, output.as.table = FALSE)
+class_metrics_rf$accuracy
+class_metrics_rf$F1
+class_metrics_rf$recall
+class_metrics_rf$precision
+
+confusionMatrix(table(anno_eval_classes,rf_predictions))
+```
+
+
+## Naive bayes classifier
+```{r}
+nb_trained_model <- naive_bayes(classes ~.,data= anno_training_term_matrix_df,usekernel = T)
+nb_predictiolns <- predict(nb_trained_model, newdata= anno_eval_term_matrix_df)
+
+accuracy(anno_eval_classes,nb_predictiolns)
+
+class_metrics_nb <- ml_test(nb_predictiolns, anno_eval_classes, output.as.table = FALSE)
+class_metrics_nb$accuracy
+class_metrics_nb$F1
+class_metrics_nb$recall
+class_metrics_nb$precision
+
+confusionMatrix(table(anno_eval_classes,nb_predictiolns))
+
+```
+
+
+## knn classifier
+```{r}
+set.seed(0722)
+knn_pred_eval <- knn(train=anno_training_term_matrix_df[,-370],
+        test=anno_eval_term_matrix_df,cl= anno_training_term_matrix_df$classes, k = 82)
+                   
+accuracy(anno_eval_classes,knn_pred_eval)
+
+confusionMatrix(table(knn_pred_eval,anno_eval_classes))
+
+class_metrics_knn <- ml_test(knn_pred_eval, anno_eval_classes, output.as.table = FALSE)
+class_metrics_knn$accuracy
+class_metrics_knn$F1
+class_metrics_knn$precision
+class_metrics_knn$recall
+  
+
+confusionMatrix(table(anno_eval_classes,knn_pred_eval))
+```
+
+## ROC curves
+```{r}
+library(pROC)
+
+# convert prediction classes to numeric
+knn_pred_eval_num <- as.numeric(as.character(knn_pred_eval))
+svm_predictions_num <-  as.numeric(as.character(svm_predictions))
+
+roc(anno_eval_classes ~ svm_predictions_num , plot=TRUE, print.auc=TRUE, col="blue",lwd = 4, legacy.axes=TRUE)
+
+```
+
+
+
+## Ensemble stragety: majority voting
+```{r}
+eval_pred_all <- as.data.frame(cbind(as.character(svm_predictions),as.character(rf_predictions),as.character(knn_pred_eval)))
+colnames(eval_pred_all) <- c("svm","randomForest","knn")
+
+
+majority_vote <- function (x) {
+    whichMax <- function(x) {
+        m <- seq_along(x)[x == max(x, na.rm = TRUE)]
+        if (length(m) > 1 & length(m) < length(x)) 
+            sample(m, size = 1)
+        if (length(m) == length(x))
+          m <- 1
+        else m
+    }
+    x <- as.vector(x)
+    tab <- table(x)
+    m <- whichMax(tab)
+    out <- list(table = tab, ind = m, majority = names(tab)[m])
+    return(out)
+}
+
+
+eval_pred_all$final <- apply(eval_pred_all,1, function(x) majority_vote(x)$majority)
+accuracy(anno_eval_classes,eval_pred_all$final)
+
+class_metrics_ense <- ml_test(eval_pred_all$final, anno_eval_classes, output.as.table = FALSE)
+class_metrics_ense$accuracy
+class_metrics_ense$F1
+class_metrics_ense$recall
+class_metrics_ense$precision
+
+
+confusionMatrix(table(anno_eval_classes,eval_pred_all$final))
+```
+
+
+
+
+
+## Make predictions on the unlabeled data
+```{r}
+# preprocess the unlabeled data
+unlabel_texts <-iconv(tada_unlabel_data$text, "ASCII", "UTF-8", sub="byte")
+unlabel_texts_corpus <- VCorpus(VectorSource(unlabel_texts))
+unlabel_texts_corpus <- tm_map(unlabel_texts_corpus,content_transformer(tolower))
+unlabel_texts_corpus <- tm_map(unlabel_texts_corpus, removePunctuation)
+unlabel_texts_corpus <- tm_map(unlabel_texts_corpus, removeWords,stopwords("english"))
+unlabel_texts_corpus <- tm_map(unlabel_texts_corpus, stemDocument)
+length(unlabel_texts_corpus)
+
+# generate the ngrams
+unlabel_n_gram_corpus <- tm_map(unlabel_texts_corpus,content_transformer(NLP_tokenizer))
+
+# generate a document-term matrix for unlabeled set 
+unlabel_dct_matrix_sparse <- DocumentTermMatrix(unlabel_n_gram_corpus,list(dictionary=colnames(anno_training_dct_matrix_sparse)))
+
+
+unlabel_dct_matrix_df <- as.data.frame(as.matrix(unlabel_dct_matrix_sparse))
+colnames(unlabel_dct_matrix_df) <- make.names(colnames(unlabel_dct_matrix_df))
+
+# make predictions
+unlabel_svm_predictions <- predict(svm_trained_model, newdata= unlabel_dct_matrix_df)
+#unlabel_rf_predictions <- predict(rf_trained_model, newdata= unlabel_dct_matrix_df)
+
+```
+
+
+
+## Compare distribution of no medical use tweets between two locations
+```{r}
+unlabel_city <- tada_unlabel_data$city
+label_city <- as.data.frame(cbind(as.character(unlabel_svm_predictions),unlabel_city))
+colnames(label_city) <- c("labels","city")
+
+table(label_city$labels,label_city$city)
+label_city$labels <- factor(label_city$labels,levels=c("Nonmedical Use","Consumption","Information"))
+
+#label_city$non_med <-  ifelse(label_city$labels==0,1,0)
+
+# bar plot
+p <- ggplot(data=label_city,aes(x=city)) + geom_bar(aes(fill=labels)) + ggtitle("Classification of Tweets over the Two Locations") + xlab("City") + ylab("Number of Tweets") + scale_fill_discrete(labels=c("Nonmedical Use","Consumption","Information"))
+
+p  + geom_text(x=1,y=12000,label="1048 (8.46%)",color="#2e4057") + geom_text(x=2,y=3000,label="217 (8.31%)",color="#2e4057") +  geom_text(x=1,y=9000,label="4590 (37.0%)",color="#2e4057") + geom_text(x=1,y=4000,label="6751 (54.5%)",color="#2e4057") + geom_text(x=2,y=800,label="1408 (53.9%)",color="#2e4057") + geom_text(x=2,y=2000,label="986 (37.8%)",color="#2e4057")
+
+```
+
